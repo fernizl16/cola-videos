@@ -35,6 +35,9 @@ main{padding:14px;max-width:560px;margin:0 auto}
 .card{background:var(--card);border-radius:20px;padding:14px;border:1px solid var(--line)}
 .cover{position:relative;border-radius:14px;overflow:hidden;background:var(--card2);aspect-ratio:9/16;max-height:52vh;margin:0 auto;display:grid;place-items:center}
 .cover img{width:100%;height:100%;object-fit:cover;display:block}
+.cover video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
+.play{position:absolute;inset:0;margin:auto;width:76px;height:76px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.7);font-size:30px;color:#fff;display:grid;place-items:center;padding-left:6px}
+.cover .prog{position:absolute;left:12px;right:12px;bottom:12px;height:40px}
 .noimg{color:var(--mut);font-size:14px}
 .badge{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.65);padding:5px 10px;border-radius:999px;font-size:13px;font-weight:600}
 h2{margin:14px 0 2px;font-size:20px}
@@ -147,6 +150,9 @@ if (!accounts.find(a => a.id === cur)) cur = accounts[0]?.id || null;
 const S = { videos: [], estado: { videos: {} }, loading: false, error: null, tab: 'next', detail: null, local: new Set(), progress: {}, busy: {}, loadedFor: null };
 const mem = new Map();        // clave -> {blob, name}  (copias locales cargadas en memoria)
 const memLoading = new Set();
+const vurls = new Map();      // clave -> objectURL para el reproductor
+function vurl(k) { let u = vurls.get(k); if (!u) { u = URL.createObjectURL(mem.get(k).blob); vurls.set(k, u); } return u; }
+function dropMem(k) { mem.delete(k); const u = vurls.get(k); if (u) { URL.revokeObjectURL(u); vurls.delete(k); } }
 const thumbs = new Map();     // sha -> objectURL | 'loading' | 'error'
 const thumbQ = []; let thumbActive = 0;
 let tcache = ls.get('cv.tcache', {});   // sha -> texto (info.json / pie.txt). Los blobs de git son inmutables.
@@ -288,39 +294,48 @@ async function loadMem(k) {
   memLoading.delete(k); scheduleRender();
 }
 
-async function descargar(v) {
+// guardar=true: se queda en el móvil (dentro de la app). guardar=false: solo para verlo ahora (en memoria).
+async function descargar(v, guardar = true) {
   const a = acc(); const k = vk(a, v);
   if (S.progress[k] != null) return;
-  S.progress[k] = 0; render();
-  try { if (navigator.storage?.persist) navigator.storage.persist(); } catch {}
+  const pre = slug(a.nombre) + '_' + slug(v.id);
+  let m = mem.get(k);
+  if (!m) { S.progress[k] = 0; S.progMode = guardar ? 'dl' : 'ver'; render(); }
+  if (guardar) { try { if (navigator.storage?.persist) navigator.storage.persist(); } catch {} }
   try {
-    const r = await rawBlob(a, v.video.sha);
-    const total = v.video.size || +r.headers.get('content-length') || 0;
-    let blob;
-    if (r.body && r.body.getReader && total) {
-      const rd = r.body.getReader(); const ch = []; let got = 0, last = 0;
-      for (;;) {
-        const { done: fin, value } = await rd.read();
-        if (fin) break;
-        ch.push(value); got += value.length;
-        const pc = Math.min(got / total, 1);
-        if (pc - last > 0.01) { last = pc; S.progress[k] = pc; updProgress(k, pc); }
+    if (!m) {
+      const r = await rawBlob(a, v.video.sha);
+      const total = v.video.size || +r.headers.get('content-length') || 0;
+      let blob;
+      if (r.body && r.body.getReader && total) {
+        const rd = r.body.getReader(); const ch = []; let got = 0, last = 0;
+        for (;;) {
+          const { done: fin, value } = await rd.read();
+          if (fin) break;
+          ch.push(value); got += value.length;
+          const pc = Math.min(got / total, 1);
+          if (pc - last > 0.01) { last = pc; S.progress[k] = pc; updProgress(k, pc); }
+        }
+        blob = new Blob(ch, { type: mime(v.video.path) });
+      } else {
+        blob = new Blob([await r.blob()], { type: mime(v.video.path) });
       }
-      blob = new Blob(ch, { type: mime(v.video.path) });
-    } else {
-      blob = new Blob([await r.blob()], { type: mime(v.video.path) });
+      m = { blob, name: pre + '.' + v.video.path.split('.').pop().toLowerCase(), temp: true };
+      // solo se mantiene en memoria una vista previa a la vez
+      for (const [kk, x] of [...mem]) if (x.temp && kk !== k) dropMem(kk);
+      mem.set(k, m);
     }
-    const pre = slug(a.nombre) + '_' + slug(v.id);
-    const name = pre + '.' + v.video.path.split('.').pop().toLowerCase();
-    await idbPut(k, { blob, name }); mem.set(k, { blob, name }); S.local.add(k);
-    if (v.portada) {
-      const pb = new Blob([await (await rawBlob(a, v.portada.sha)).blob()], { type: mime(v.portada.path) });
-      const pn = pre + '_portada.' + v.portada.path.split('.').pop().toLowerCase();
-      await idbPut(pk(a, v), { blob: pb, name: pn }); mem.set(pk(a, v), { blob: pb, name: pn }); S.local.add(pk(a, v));
-    }
-    toast('Listo: vídeo y portada en el móvil ✓');
+    if (guardar) {
+      await idbPut(k, { blob: m.blob, name: m.name }); m.temp = false; S.local.add(k);
+      if (v.portada) {
+        const pb = new Blob([await (await rawBlob(a, v.portada.sha)).blob()], { type: mime(v.portada.path) });
+        const pn = pre + '_portada.' + v.portada.path.split('.').pop().toLowerCase();
+        await idbPut(pk(a, v), { blob: pb, name: pn }); mem.set(pk(a, v), { blob: pb, name: pn }); S.local.add(pk(a, v));
+      }
+      toast('Listo: vídeo y portada en el móvil ✓');
+    } else S.autoplay = k;
   } catch (e) {
-    toast('Error al descargar: ' + e.message, true);
+    toast((guardar ? 'Error al descargar: ' : 'No se pudo cargar el vídeo: ') + e.message, true);
   }
   delete S.progress[k]; render();
 }
@@ -348,7 +363,7 @@ async function share(k, what) {
 
 async function quitarLocal(v, silent) {
   const a = acc();
-  for (const k of [vk(a, v), pk(a, v)]) { try { await idbDel(k); } catch {} mem.delete(k); S.local.delete(k); }
+  for (const k of [vk(a, v), pk(a, v)]) { try { await idbDel(k); } catch {} dropMem(k); S.local.delete(k); }
   if (!silent) toast('Copia borrada del móvil');
   render();
 }
@@ -452,7 +467,16 @@ function render() {
       }
     }
   }
+  // Conserva los reproductores que ya están en pantalla para no cortar el vídeo al refrescar
+  const keep = {};
+  document.querySelectorAll('#view video[data-k]').forEach(el => keep[el.dataset.k] = el);
   $('#view').innerHTML = h;
+  document.querySelectorAll('#view video[data-k]').forEach(n => { const old = keep[n.dataset.k]; if (old && old.getAttribute('src') === n.getAttribute('src')) n.replaceWith(old); });
+  if (S.autoplay) {
+    const el = document.querySelector(`#view video[data-k="${CSS.escape(S.autoplay)}"]`);
+    S.autoplay = null;
+    if (el) el.play().catch(() => {});
+  }
 }
 
 function card(v) {
@@ -463,14 +487,22 @@ function card(v) {
   const th = thumb(a, v);
   const est = S.estado.videos[v.id] || {};
   const id = esc(v.id);
+  const playable = mem.has(k);
+  const progBar = `<div class="prog"><div class="bar" id="pb-${cssid(k)}" style="width:${((prog || 0) * 100).toFixed(1)}%"></div><span id="pt-${cssid(k)}">${S.progMode === 'ver' ? 'Cargando' : 'Descargando'}… ${Math.round((prog || 0) * 100)}%</span></div>`;
+  let cover;
+  if (playable) cover = `<video data-k="${esc(k)}" src="${vurl(k)}" controls playsinline preload="metadata"${th ? ` poster="${th}"` : ''}></video>`;
+  else cover = (th ? `<img src="${th}" alt="Portada">` : `<div class="noimg">${v.portada ? 'Cargando portada…' : 'Sin portada'}</div>`)
+    + (prog != null && S.progMode === 'ver' ? progBar : prog == null ? `<button class="play" data-act="ver" data-id="${esc(v.id)}" aria-label="Reproducir">▶</button>` : '');
   let actions;
-  if (prog != null) actions = `<div class="prog"><div class="bar" id="pb-${cssid(k)}" style="width:${(prog * 100).toFixed(1)}%"></div><span id="pt-${cssid(k)}">Descargando… ${Math.round(prog * 100)}%</span></div>`;
+  if (prog != null && S.progMode === 'ver') actions = `<button class="btn primary" disabled>Cargando vídeo para verlo…</button>`;
+  else if (prog != null) actions = `<div class="prog"><div class="bar" id="pb-${cssid(k)}" style="width:${(prog * 100).toFixed(1)}%"></div><span id="pt-${cssid(k)}">Descargando… ${Math.round(prog * 100)}%</span></div>`;
   else if (local) actions = `<button class="btn primary" data-act="sharev" data-id="${id}">📤 Compartir vídeo</button>`
     + (v.portada ? `<button class="btn" data-act="sharep" data-id="${id}">🖼️ Guardar / compartir portada</button>` : '')
     + `<button class="btn ghost small danger" data-act="rmlocal" data-id="${id}">🗑️ Quitar del móvil</button>`;
+  else if (playable) actions = `<button class="btn primary" data-act="dl" data-id="${id}">⬇️ Guardar en el móvil para publicarlo</button>`;
   else actions = `<button class="btn primary" data-act="dl" data-id="${id}">⬇️ Descargar vídeo${v.portada ? ' y portada' : ''} · ${mb(v.video.size)}</button>`;
   return `<article class="card">
-    <div class="cover">${th ? `<img src="${th}" alt="Portada">` : `<div class="noimg">${v.portada ? 'Cargando portada…' : 'Sin portada'}</div>`}${local ? '<span class="badge">📱 En el móvil</span>' : ''}</div>
+    <div class="cover">${cover}${local && !playable ? '<span class="badge">📱 En el móvil</span>' : ''}</div>
     <h2>${esc(v.titulo)}</h2>
     <div class="meta">${id} · ${mb(v.video.size)}${v.creado ? ' · subido ' + esc(fecha(v.creado)) : ''}</div>
     ${v.notas ? `<p class="notas">${esc(v.notas)}</p>` : ''}${v.err ? `<p class="err">${esc(v.err)}</p>` : ''}
@@ -602,6 +634,7 @@ document.addEventListener('click', e => {
     case 'open': S.detail = id; render(); window.scrollTo(0, 0); break;
     case 'back': S.detail = null; render(); break;
     case 'dl': if (v) descargar(v); break;
+    case 'ver': if (v) descargar(v, false); break;
     case 'sharev': if (v) share(vk(a, v), 'Vídeo'); break;
     case 'sharep': if (v) share(pk(a, v), 'Portada'); break;
     case 'rmlocal': if (v) quitarLocal(v); break;
@@ -619,7 +652,7 @@ document.addEventListener('click', e => {
     case 'wipe': (async () => {
         if (!confirm('¿Borrar todas las copias descargadas en el móvil? Siguen disponibles en GitHub.')) return;
         try { for (const k of await idbKeys()) await idbDel(k); } catch {}
-        mem.clear(); S.local.clear(); toast('Copias borradas'); renderSettings(); render();
+        [...mem.keys()].forEach(dropMem); S.local.clear(); toast('Copias borradas'); renderSettings(); render();
       })(); break;
   }
 });
