@@ -350,9 +350,21 @@ async function share(k, what) {
   const m = mem.get(k);
   if (!m) { toast('Aún no está en el móvil. Descárgalo primero.', true); return; }
   const file = new File([m.blob], m.name, { type: m.blob.type });
+  const bajar = () => {
+    const u = URL.createObjectURL(m.blob);
+    const l = document.createElement('a'); l.href = u; l.download = m.name; document.body.appendChild(l); l.click(); l.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 60000);
+  };
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file] }); }
-    catch (e) { if (e.name !== 'AbortError') toast('No se pudo compartir: ' + e.message, true); }
+    catch (e) {
+      if (e.name === 'AbortError') return;
+      if (e.name === 'NotAllowedError' && m.blob.size > 49 * 1048576) {
+        // Chrome en Android no deja compartir archivos de más de 50 MB: se guarda en Descargas
+        bajar();
+        toast(`${what} de ${mb(m.blob.size)}: demasiado grande para compartir. Guardado en Descargas (bórralo al publicar).`, true);
+      } else toast('No se pudo compartir: ' + e.message, true);
+    }
   } else {
     const u = URL.createObjectURL(m.blob);
     const l = document.createElement('a'); l.href = u; l.download = m.name; document.body.appendChild(l); l.click(); l.remove();

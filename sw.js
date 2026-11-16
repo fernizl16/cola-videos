@@ -1,6 +1,6 @@
 // Service worker: guarda solo la "carcasa" de la app para que abra rápido.
 // Nunca cachea nada de GitHub (vídeos, pies, estado).
-const C = 'cola-videos-v2';
+const C = 'cola-videos-v3';
 const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
